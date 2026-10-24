@@ -21,7 +21,14 @@ ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 sha2 = "0.10"
-solana-sdk = "2.3"
+solana-hash = "2.3"
+solana-instruction = "2.3"
+solana-keypair = "2.2"
+solana-message = "2.4"
+solana-pubkey = { version = "2.4", features = ["curve25519"] }
+solana-signer = "2.2"
+solana-system-interface = { version = "1.0", features = ["bincode"] }
+solana-transaction = { version = "2.2", features = ["bincode"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [profile.release]

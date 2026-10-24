@@ -5,15 +5,13 @@ use crate::rpc::RpcPool;
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
 use sha2::{Digest, Sha256};
-use solana_sdk::{
-    hash::Hash,
-    instruction::{AccountMeta, Instruction},
-    message::Message,
-    pubkey::Pubkey,
-    signature::Keypair,
-    signer::Signer,
-    transaction::Transaction,
-};
+use solana_hash::Hash;
+use solana_instruction::{AccountMeta, Instruction};
+use solana_keypair::Keypair;
+use solana_message::Message;
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
+use solana_transaction::Transaction;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -121,7 +119,7 @@ impl Chain {
                 AccountMeta::new(self.token_account(owner), false),
                 AccountMeta::new_readonly(*owner, false),
                 AccountMeta::new_readonly(key(self.network.token_mint()), false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(solana_system_interface::program::ID, false),
                 AccountMeta::new_readonly(key(TOKEN_2022_PROGRAM_ID), false),
             ],
         )
@@ -183,7 +181,7 @@ impl Chain {
 
     /// Send XNT (lamports) to another address
     pub async fn transfer_xnt(&self, payer: &Keypair, to: &Pubkey, lamports: u64) -> Result<String> {
-        let ix = solana_sdk::system_instruction::transfer(&payer.pubkey(), to, lamports);
+        let ix = solana_system_interface::instruction::transfer(&payer.pubkey(), to, lamports);
         self.send(payer, vec![ix]).await
     }
 
@@ -302,7 +300,7 @@ mod tests {
         chain.rpc.set_rotation(true);
         let (usable, advertised) = chain.rpc.discover().await.unwrap();
         println!("discovered {usable} usable of {advertised}");
-        assert!(chain.rpc.endpoints().len() >= 1);
+        assert!(!chain.rpc.endpoints().is_empty());
         // A read through the pool
         assert!(chain.supply().await.unwrap() > 0);
     }

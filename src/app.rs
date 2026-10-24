@@ -17,7 +17,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, LineGauge, List, ListItem, Paragraph, Wrap},
     DefaultTerminal, Frame,
 };
-use solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer};
+use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -346,7 +348,7 @@ impl App {
         if let Some(mut old) = self.session.take() {
             old.close();
         }
-        let payer = match solana_sdk::signature::read_keypair_file(&path) {
+        let payer = match solana_keypair::read_keypair_file(&path) {
             Ok(k) => {
                 self.wallet_error = None;
                 k
