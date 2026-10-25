@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # solana-keygen from the official Solana CLI (Anza), shipped next to memo-miner
+  KEYGEN_VERSION: 4.3.2
+
 jobs:
   build:
     strategy:
@@ -25,17 +29,25 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build solana-keygen
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libudev-dev
+          fi
+          cargo install solana-keygen --version "=$KEYGEN_VERSION" --locked --target ${{ matrix.target }} --root keygen
+          curl -sSfL "https://raw.githubusercontent.com/anza-xyz/agave/v$KEYGEN_VERSION/LICENSE" -o LICENSE-solana-keygen
       - name: Package
         shell: bash
         run: |
           name=memo-miner-${GITHUB_REF_NAME}-${{ matrix.target }}
           mkdir "$name"
-          cp README.md LICENSE "$name"/
+          cp README.md LICENSE LICENSE-solana-keygen "$name"/
           if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cp target/${{ matrix.target }}/release/memo-miner.exe "$name"/
+            cp target/${{ matrix.target }}/release/memo-miner.exe keygen/bin/solana-keygen.exe "$name"/
             7z a "$name.zip" "$name"
           else
-            cp target/${{ matrix.target }}/release/memo-miner "$name"/
+            cp target/${{ matrix.target }}/release/memo-miner keygen/bin/solana-keygen "$name"/
             tar czf "$name.tar.gz" "$name"
           fi
       - uses: softprops/action-gh-release@v2

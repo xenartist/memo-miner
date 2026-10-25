@@ -6,19 +6,67 @@
 - Automatic minting: mints in a loop until you stop it.
 - RPC rotation: spreads requests over the RPC nodes the X1 cluster advertises, so a single endpoint's rate limit does not stop you.
 - Runs on Windows, macOS and Linux, in a terminal.
-- Your wallet is created and kept by the official [Solana CLI](https://docs.anza.xyz/cli/install). MEMO Miner never generates keys itself.
+- Your wallet is created by `solana-keygen` from the official [Solana CLI](https://docs.anza.xyz/cli/install) (Anza), which ships inside every release archive. Nothing else to install. MEMO Miner never generates keys itself.
 
 ![Automatic minting on the Mint tab](screenshot/4_mint_auto.png)
 
 ## Install
 
-Download the archive for your system from [Releases](https://github.com/xenartist/memo-miner/releases), unpack it and run `memo-miner` (`memo-miner.exe` on Windows) in a terminal.
+Download the archive for your system from [Releases](https://github.com/xenartist/memo-miner/releases), unpack it and run `memo-miner` (`memo-miner.exe` on Windows) in a terminal. Keep `solana-keygen` in the same folder: MEMO Miner uses it to create your wallet.
 
-Or build it with Rust:
+| System | Archive |
+| --- | --- |
+| Windows | `x86_64-pc-windows-msvc.zip` |
+| macOS, Apple silicon (M1 and later) | `aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `x86_64-apple-darwin.tar.gz` |
+| Linux, x86_64 | `x86_64-unknown-linux-gnu.tar.gz` |
+| Linux, ARM64 | `aarch64-unknown-linux-gnu.tar.gz` |
+
+The builds are not signed with an Apple or Microsoft certificate, so the first run needs one extra step.
+
+### macOS: first run
+
+```bash
+cd ~/Downloads
+tar xzf memo-miner-*-apple-darwin.tar.gz
+cd memo-miner-*-apple-darwin
+xattr -dr com.apple.quarantine .   # let macOS run memo-miner and solana-keygen, downloaded from the web
+./memo-miner
+```
+
+If you skipped `xattr` and macOS says "memo-miner" cannot be opened because Apple cannot check it for malicious software:
+
+1. Close the message (do not move the file to the Bin).
+2. Open System Settings > Privacy & Security, scroll to Security and click **Open Anyway** next to "memo-miner" was blocked.
+3. Run `./memo-miner` again and choose **Open** when asked.
+
+macOS asks the same for `solana-keygen` the first time you create a wallet. Running the `xattr` line above avoids both.
+
+### Windows: first run
+
+1. Right-click the downloaded `.zip`, choose **Properties**, tick **Unblock** and click OK. This keeps Windows from flagging the program later.
+2. Right-click the `.zip` again, choose **Extract All**.
+3. Open [Windows Terminal](https://aka.ms/terminal) (built into Windows 11) in the extracted folder: right-click inside the folder and choose **Open in Terminal**.
+4. Run:
+
+   ```powershell
+   .\memo-miner.exe
+   ```
+
+If a blue "Windows protected your PC" (SmartScreen) window appears, click **More info**, then **Run anyway**.
+
+Windows Terminal is recommended over the old Command Prompt window: colours, mouse clicks and the layout display correctly there.
+
+### Build from source
+
+With [Rust](https://rustup.rs) installed:
 
 ```bash
 cargo install --git https://github.com/xenartist/memo-miner
+cargo install solana-keygen --locked   # on Linux, first: sudo apt install build-essential pkg-config libudev-dev
 ```
+
+A build from source finds `solana-keygen` on your PATH, in `~/.cargo/bin` or in an existing Solana CLI install.
 
 ## Using it
 
@@ -26,8 +74,7 @@ Run `memo-miner`. Everything happens inside the terminal app, with the keyboard 
 
 ### First run
 
-1. MEMO Miner looks for the Solana CLI (`solana-keygen`).
-   If it is missing, **Install Solana CLI** runs Anza's official installer for the stable release and shows its output.
+1. MEMO Miner finds `solana-keygen` next to itself.
 2. **Create minting wallet** runs `solana-keygen new` and shows the new address and seed phrase once.
    Write the seed phrase down and keep it offline.
 3. Send a little XNT to the wallet address. XNT pays the fee for each mint.
@@ -87,4 +134,4 @@ The miner waits for each mint to confirm before sending the next.
 
 ## License
 
-MIT
+MIT. Release archives also include `solana-keygen` from [Agave](https://github.com/anza-xyz/agave), built unmodified from its published source, under the Apache License 2.0 (`LICENSE-solana-keygen`).

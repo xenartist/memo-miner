@@ -1,13 +1,12 @@
-//! The official Solana CLI: finding it, installing it, and creating wallets with `solana-keygen`.
-//! The miner never generates keys itself; it only reads the keypair file the Solana CLI wrote.
+//! `solana-keygen` from the official Solana CLI (Anza): finding it and creating wallets with it.
+//! Release archives ship it next to memo-miner. The miner never generates keys itself; it only
+//! reads the keypair file solana-keygen wrote.
 
 use anyhow::{anyhow, bail, Context, Result};
-use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::Sender;
 
-pub const INSTALL_DOCS: &str = "https://docs.anza.xyz/cli/install";
+pub const KEYGEN_INSTALL: &str = "cargo install solana-keygen --locked";
 
 fn exe(name: &str) -> String {
     if cfg!(windows) {
@@ -17,76 +16,33 @@ fn exe(name: &str) -> String {
     }
 }
 
-/// Where the official installer puts the active release
+/// Next to the memo-miner executable, where every release archive ships solana-keygen
+fn bundled_dir() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.to_path_buf())
+}
+
+/// Where Anza's installer puts the active release
 fn install_bin_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".local/share/solana/install/active_release/bin"))
 }
 
-/// `solana-keygen` from PATH or from the installer's directory
+/// Where `cargo install` puts programs (a solana-keygen built from source)
+fn cargo_bin_dir() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".cargo/bin"))
+}
+
+/// `solana-keygen`: the one shipped next to memo-miner first, then PATH, Anza's installer and cargo
 pub fn find_keygen() -> Option<PathBuf> {
     let name = exe("solana-keygen");
     let on_path = std::env::var_os("PATH")
         .into_iter()
-        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .map(|d| d.join(&name));
-    on_path.chain(install_bin_dir().map(|d| d.join(&name))).find(|p| p.is_file())
-}
-
-/// What the installer will run, shown to the user before they agree
-pub fn install_description() -> &'static str {
-    if cfg!(windows) {
-        "Download agave-install-init-x86_64-pc-windows-msvc.exe from release.anza.xyz and run it with \"stable\""
-    } else {
-        "curl --proto '=https' --tlsv1.2 -sSfL https://release.anza.xyz/stable/install | sh"
-    }
-}
-
-/// Forward a child's output to `lines`, splitting on \n and \r (progress bars), without blocking the UI
-fn pipe_lines<R: Read + Send + 'static>(reader: R, lines: Sender<String>) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut buf = Vec::new();
-        while reader.read_until(b'\n', &mut buf).map(|n| n > 0).unwrap_or(false) {
-            let text = String::from_utf8_lossy(&buf).to_string();
-            if let Some(last) = text.split('\r').map(str::trim_end).rfind(|s| !s.is_empty()) {
-                let _ = lines.send(last.to_string());
-            }
-            buf.clear();
-        }
-    })
-}
-
-fn run_streaming(cmd: &mut Command, lines: &Sender<String>) -> Result<()> {
-    let _ = lines.send(format!("$ {cmd:?}"));
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("Starting {cmd:?}"))?;
-    let out = pipe_lines(child.stdout.take().unwrap(), lines.clone());
-    let err = pipe_lines(child.stderr.take().unwrap(), lines.clone());
-    let status = child.wait()?;
-    let _ = (out.join(), err.join());
-    if !status.success() {
-        bail!("exited with {status}");
-    }
-    Ok(())
-}
-
-/// Run Anza's official installer for the stable release, streaming its output (blocking; run on a thread)
-pub fn install_solana_cli(lines: Sender<String>) -> Result<PathBuf> {
-    if cfg!(windows) {
-        let dir = std::env::temp_dir().join("agave-install-tmp");
-        std::fs::create_dir_all(&dir)?;
-        let init = dir.join("agave-install-init.exe");
-        let url = "https://release.anza.xyz/stable/agave-install-init-x86_64-pc-windows-msvc.exe";
-        run_streaming(Command::new("curl").args(["-sSfL", url, "--output"]).arg(&init), &lines)?;
-        run_streaming(Command::new(&init).arg("stable"), &lines)?;
-    } else {
-        run_streaming(Command::new("sh").args(["-c", install_description()]), &lines)?;
-    }
-    find_keygen().ok_or_else(|| anyhow!("Installed, but solana-keygen was not found. See {INSTALL_DOCS}"))
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>());
+    bundled_dir()
+        .into_iter()
+        .chain(on_path)
+        .chain([install_bin_dir(), cargo_bin_dir()].into_iter().flatten())
+        .map(|d| d.join(&name))
+        .find(|p| p.is_file())
 }
 
 /// The wallet file name, kept next to the Solana CLI's own keypairs

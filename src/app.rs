@@ -66,8 +66,6 @@ enum Msg {
     AutoStopped(u64, String),
     Sent { what: String, result: Result<String, String> },
     WalletCreated(Result<NewWallet, String>),
-    InstallLine(String),
-    InstallDone(Result<PathBuf, String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -98,7 +96,7 @@ enum Action {
     SendMemo,
     NewWallet,
     CheckAgain,
-    InstallCli,
+    KeygenHelp,
     Quit,
     FormField(usize),
     ModalOk,
@@ -123,7 +121,6 @@ struct Form {
 enum Pending {
     SendXnt { to: Pubkey, lamports: u64 },
     SendMemo { to: Pubkey, units: u64 },
-    Install,
     CreateWallet,
 }
 
@@ -132,7 +129,6 @@ enum Modal {
     Confirm { title: String, lines: Vec<String>, ok: String, pending: Pending },
     Info { title: String, lines: Vec<String> },
     Seed(NewWallet),
-    Install { lines: Vec<String>, done: Option<Result<PathBuf, String>> },
     Busy(String),
 }
 
@@ -300,6 +296,10 @@ impl App {
         }
         while !self.quit {
             self.tick = self.tick.wrapping_add(1);
+            // On the welcome screen, notice solana-keygen once it is put in place
+            if self.session.is_none() && self.keygen.is_none() && self.tick.is_multiple_of(8) {
+                self.keygen = setup::find_keygen();
+            }
             // On the welcome screen, open the wallet as soon as the file appears (about once a second)
             if self.session.is_none()
                 && self.modal.is_none()
@@ -494,20 +494,6 @@ impl App {
             Msg::WalletCreated(Err(e)) => {
                 self.modal = Some(Modal::Info { title: "Creating the wallet failed".into(), lines: vec![e] })
             }
-            Msg::InstallLine(line) => {
-                if let Some(Modal::Install { lines, .. }) = &mut self.modal {
-                    lines.push(line);
-                }
-            }
-            Msg::InstallDone(r) => {
-                if let Ok(path) = &r {
-                    self.keygen = Some(path.clone());
-                    self.push_log(Kind::Good, format!("Solana CLI installed: {}", path.display()));
-                }
-                if let Some(Modal::Install { done, .. }) = &mut self.modal {
-                    *done = Some(r);
-                }
-            }
         }
     }
 
@@ -535,7 +521,7 @@ impl App {
             _ if self.session.is_none() => match code {
                 KeyCode::Char('c') | KeyCode::Char('n') => Some(Action::NewWallet),
                 KeyCode::Char('r') => Some(Action::CheckAgain),
-                KeyCode::Char('s') if self.keygen.is_none() => Some(Action::InstallCli),
+                KeyCode::Char('s') if self.keygen.is_none() => Some(Action::KeygenHelp),
                 _ => None,
             },
             KeyCode::Char('1') => Some(Action::Tab(Tab::Mint)),
@@ -603,11 +589,6 @@ impl App {
                     self.act(Action::ModalOk);
                 }
             }
-            Modal::Install { done, .. } => {
-                if done.is_some() && matches!(code, KeyCode::Enter | KeyCode::Esc) {
-                    self.act(Action::ModalOk);
-                }
-            }
             Modal::Busy(_) => {}
         }
     }
@@ -626,7 +607,7 @@ impl App {
             Action::SendXnt | Action::SendMemo => self.open_send_form(action == Action::SendXnt),
             Action::NewWallet => {
                 if self.keygen.is_none() {
-                    return self.ask_install();
+                    return self.keygen_help();
                 }
                 let mut lines = vec![
                     "solana-keygen will create a new wallet file:".to_string(),
@@ -643,7 +624,7 @@ impl App {
                     pending: Pending::CreateWallet,
                 });
             }
-            Action::InstallCli => self.ask_install(),
+            Action::KeygenHelp => self.keygen_help(),
             Action::CheckAgain => {
                 self.keygen = setup::find_keygen();
                 self.wallet_error = None;
@@ -665,20 +646,19 @@ impl App {
         }
     }
 
-    fn ask_install(&mut self) {
-        self.modal = Some(Modal::Confirm {
-            title: "Install the Solana CLI".into(),
-            lines: vec![
-                "MEMO Miner uses the official Solana CLI (by Anza) to create and keep your wallet,".into(),
-                "so it never handles seed phrases itself. It will run the official installer:".into(),
-                String::new(),
-                setup::install_description().into(),
-                String::new(),
-                format!("More: {}", setup::INSTALL_DOCS),
-            ],
-            ok: "Install".into(),
-            pending: Pending::Install,
-        });
+    /// solana-keygen is missing: it ships next to memo-miner in every release archive
+    fn keygen_help(&mut self) {
+        let lines = vec![
+            "MEMO Miner creates your wallet with solana-keygen from the official Solana CLI (Anza).".into(),
+            "It ships next to memo-miner in every release archive: keep the two files together.".into(),
+            String::new(),
+            "Built MEMO Miner from source? Install solana-keygen with Rust:".into(),
+            format!("  {}", setup::KEYGEN_INSTALL),
+            "(on Linux, first: sudo apt install build-essential pkg-config libudev-dev)".into(),
+            String::new(),
+            "MEMO Miner notices it as soon as it is in place.".into(),
+        ];
+        self.modal = Some(Modal::Info { title: "solana-keygen not found".into(), lines });
     }
 
     fn modal_ok(&mut self) {
@@ -693,34 +673,16 @@ impl App {
                 self.open_session(w.path);
                 self.tab = Tab::Wallet;
             }
-            // The installer is still running, or work is in progress: stay
-            Some(m @ (Modal::Install { done: None, .. } | Modal::Busy(_))) => self.modal = Some(m),
+            // Work is in progress: stay
+            Some(m @ Modal::Busy(_)) => self.modal = Some(m),
             _ => {}
         }
     }
 
     fn run_pending(&mut self, pending: Pending) {
         match pending {
-            Pending::Install => {
-                self.modal = Some(Modal::Install { lines: Vec::new(), done: None });
-                let tx = self.tx.clone();
-                std::thread::spawn(move || {
-                    let (line_tx, line_rx) = std::sync::mpsc::channel();
-                    let forward = {
-                        let tx = tx.clone();
-                        std::thread::spawn(move || {
-                            for line in line_rx {
-                                let _ = tx.send(Msg::InstallLine(line));
-                            }
-                        })
-                    };
-                    let r = setup::install_solana_cli(line_tx).map_err(|e| e.to_string());
-                    let _ = forward.join();
-                    let _ = tx.send(Msg::InstallDone(r));
-                });
-            }
             Pending::CreateWallet => {
-                let Some(keygen) = self.keygen.clone() else { return self.ask_install() };
+                let Some(keygen) = self.keygen.clone() else { return self.keygen_help() };
                 self.modal = Some(Modal::Busy("Creating the wallet with solana-keygen...".into()));
                 if let Some(mut s) = self.session.take() {
                     s.close();
@@ -1044,7 +1006,7 @@ impl App {
             &[("Enter", "confirm"), ("Esc", "cancel"), ("Tab", "next field")]
         } else if self.session.is_none() {
             if self.keygen.is_none() {
-                &[("s", "install Solana CLI"), ("r", "check again"), ("q", "quit")]
+                &[("s", "get solana-keygen"), ("r", "check again"), ("q", "quit")]
             } else {
                 &[("c", "create wallet"), ("r", "check again"), ("q", "quit")]
             }
@@ -1113,15 +1075,15 @@ impl App {
         ];
         lines.push(Line::from(vec![
             check(self.keygen.is_some()),
-            Span::styled("Solana CLI   ", Style::new().fg(MUTED)),
+            Span::styled("solana-keygen  ", Style::new().fg(MUTED)),
             match &self.keygen {
-                Some(_) => Span::styled("installed", Style::new().fg(TEXT)),
-                None => Span::styled("not installed", Style::new().fg(PINK)),
+                Some(_) => Span::styled("ready", Style::new().fg(TEXT)),
+                None => Span::styled("not found", Style::new().fg(PINK)),
             },
         ]));
         lines.push(Line::from(vec![
             check(false),
-            Span::styled("Wallet       ", Style::new().fg(MUTED)),
+            Span::styled("Wallet         ", Style::new().fg(MUTED)),
             Span::styled(
                 if self.wallet_error.is_some() {
                     format!("{} cannot be read", tilde(&self.wallet_path))
@@ -1145,7 +1107,7 @@ impl App {
         if self.keygen.is_some() {
             list.push(Button::new(Some("c"), "Create minting wallet", Action::NewWallet, true));
         } else {
-            list.push(Button::new(Some("s"), "Install Solana CLI", Action::InstallCli, true));
+            list.push(Button::new(Some("s"), "Get solana-keygen", Action::KeygenHelp, true));
         }
         list.push(Button::new(Some("r"), "Check again", Action::CheckAgain, false));
         list.push(Button::new(Some("q"), "Quit", Action::Quit, false));
@@ -1488,30 +1450,6 @@ impl App {
                     Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
                     &[Button::new(Some("Enter"), "I have written it down", Action::ModalOk, true)],
                 );
-            }
-            Modal::Install { lines, done } => {
-                let r = centered(area, 104, area.height.saturating_sub(4).max(10));
-                let inner = self.modal_frame(f, r, "Installing the Solana CLI");
-                let log_h = inner.height.saturating_sub(3) as usize;
-                let shown: Vec<Line> =
-                    lines.iter().skip(lines.len().saturating_sub(log_h)).map(|l| Line::from(l.clone()).fg(MUTED)).collect();
-                f.render_widget(Paragraph::new(shown), Rect { height: log_h as u16, ..inner });
-                let status = match done {
-                    None => Line::from(vec![
-                        Span::styled(format!("{} ", self.spinner()), Style::new().fg(ACCENT)),
-                        Span::styled("Running the official installer...", Style::new().fg(TEXT)),
-                    ]),
-                    Some(Ok(p)) => Line::from(format!("✓ Installed: {}", p.display())).fg(ACCENT),
-                    Some(Err(e)) => Line::from(format!("✕ Failed: {e}. See {}", setup::INSTALL_DOCS)).fg(PINK),
-                };
-                f.render_widget(status, Rect { y: inner.bottom().saturating_sub(2), height: 1, ..inner });
-                if done.is_some() {
-                    self.buttons(
-                        f,
-                        Rect { y: inner.bottom().saturating_sub(1), height: 1, ..inner },
-                        &[Button::new(Some("Enter"), "Close", Action::ModalOk, true)],
-                    );
-                }
             }
         }
         self.modal = Some(modal);
