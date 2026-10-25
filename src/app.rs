@@ -64,6 +64,8 @@ enum Msg {
     Minted { gen: u64, auto: bool, result: Result<(String, u64), String> },
     Discovered(u64, Result<(usize, usize), String>),
     AutoStopped(u64, String),
+    /// A mint was not sent: the wallet has less XNT than minting needs (gen, balance)
+    LowXnt(u64, u64),
     Sent { what: String, result: Result<String, String> },
     WalletCreated(Result<NewWallet, String>),
 }
@@ -469,6 +471,16 @@ impl App {
                     Err(e) => self.push_log(Kind::Bad, format!("RPC discovery failed: {e}")),
                 }
             }
+            Msg::LowXnt(gen, balance) => {
+                if let Some(s) = self.current(gen) {
+                    s.minting = false;
+                    s.auto = None;
+                    if let Some(snap) = &mut s.snapshot {
+                        snap.xnt = balance;
+                    }
+                    self.show_low_xnt(balance);
+                }
+            }
             Msg::AutoStopped(gen, reason) => {
                 if let Some(s) = self.current(gen) {
                     s.auto = None;
@@ -774,12 +786,42 @@ impl App {
 
     // ---------- minting ----------
 
+    /// The last known XNT balance, if it is below what minting needs
+    fn known_low_xnt(&self) -> Option<u64> {
+        let xnt = self.session.as_ref()?.snapshot.as_ref()?.xnt;
+        (xnt < MIN_XNT_LAMPORTS).then_some(xnt)
+    }
+
+    fn show_low_xnt(&mut self, balance: u64) {
+        let Some(s) = &self.session else { return };
+        let lines = vec![
+            format!("This wallet has {} XNT. Minting needs at least {} XNT,", lamports(balance), lamports(MIN_XNT_LAMPORTS)),
+            "which pays the network fee for each mint.".into(),
+            String::new(),
+            "Send some XNT to this wallet first:".into(),
+            s.payer.pubkey().to_string(),
+            String::new(),
+            "Copy the address on the Wallet tab (c). The balance updates by itself.".into(),
+        ];
+        self.modal = Some(Modal::Info { title: "Not enough XNT".into(), lines });
+    }
+
     fn mint_once(&mut self) {
+        if let Some(balance) = self.known_low_xnt() {
+            return self.show_low_xnt(balance);
+        }
         let tx = self.tx.clone();
         let Some(s) = self.session.as_mut().filter(|s| !s.minting && s.auto.is_none()) else { return };
         s.minting = true;
         let (chain, payer, gen) = (s.chain.clone(), s.payer.clone(), s.gen);
         tokio::spawn(async move {
+            // Check the balance first so an unfunded wallet gets a clear message, not a failed simulation
+            if let Ok(b) = chain.xnt_balance(&payer.pubkey()).await {
+                if b < MIN_XNT_LAMPORTS {
+                    let _ = tx.send(Msg::LowXnt(gen, b));
+                    return;
+                }
+            }
             let result = mint(&chain, &payer).await;
             let _ = tx.send(Msg::Minted { gen, auto: false, result });
         });
@@ -796,19 +838,30 @@ impl App {
         if s.minting {
             return;
         }
+        if let Some(balance) = self.known_low_xnt() {
+            return self.show_low_xnt(balance);
+        }
+        let Some(s) = self.session.as_mut() else { return };
         let stop = Arc::new(AtomicBool::new(false));
         s.auto = Some(Auto { stop: stop.clone(), ok: 0, failed: 0 });
         let (chain, payer, gen) = (s.chain.clone(), s.payer.clone(), s.gen);
         self.push_log(Kind::Good, format!("Automatic minting started, every {} s", AUTO_INTERVAL.as_secs()));
         tokio::spawn(async move {
             let mut failures_in_row = 0;
+            let mut first = true;
             while !stop.load(Ordering::Relaxed) {
                 if let Ok(b) = chain.xnt_balance(&payer.pubkey()).await {
                     if b < MIN_XNT_LAMPORTS {
-                        let _ = tx.send(Msg::AutoStopped(gen, format!("XNT balance below {}", lamports(MIN_XNT_LAMPORTS))));
+                        let msg = if first {
+                            Msg::LowXnt(gen, b)
+                        } else {
+                            Msg::AutoStopped(gen, format!("XNT balance below {}", lamports(MIN_XNT_LAMPORTS)))
+                        };
+                        let _ = tx.send(msg);
                         return;
                     }
                 }
+                first = false;
                 let _ = tx.send(Msg::MintStarted(gen));
                 let result = mint(&chain, &payer).await;
                 failures_in_row = if result.is_ok() { 0 } else { failures_in_row + 1 };
@@ -869,10 +922,23 @@ impl App {
 
     fn copy_address(&mut self) {
         let Some(address) = self.session.as_ref().map(|s| s.payer.pubkey().to_string()) else { return };
-        match self.clipboard.as_mut().map(|c| c.set_text(address.clone())) {
-            Some(Ok(())) => self.push_log(Kind::Info, format!("Copied {address}")),
-            _ => self.push_log(Kind::Bad, format!("No clipboard here; the address is {address}")),
+        if let Some(Ok(())) = self.clipboard.as_mut().map(|c| c.set_text(address.clone())) {
+            return self.push_log(Kind::Info, format!("Copied {address}"));
         }
+        // No system clipboard (a container, SSH, no desktop): ask the terminal itself to copy (OSC 52)
+        osc52_copy(&address);
+        self.push_log(Kind::Info, format!("Sent {address} to the terminal's clipboard"));
+        let lines = vec![
+            "There is no system clipboard here (a container, SSH or no desktop), so the address".into(),
+            "was handed to your terminal to copy. iTerm2, Windows Terminal, kitty, WezTerm and".into(),
+            "most others do; macOS Terminal does not.".into(),
+            String::new(),
+            address,
+            String::new(),
+            "If nothing was copied, select the address above with the mouse while holding Shift".into(),
+            "(Option in macOS Terminal and iTerm2).".into(),
+        ];
+        self.modal = Some(Modal::Info { title: "Copy address".into(), lines });
     }
 
     // ---------- drawing ----------
@@ -1484,6 +1550,16 @@ impl Button {
 }
 
 /// One mint: the reward is read from the supply just before sending
+/// Put `text` on the clipboard of the terminal this runs in, through the OSC 52 escape sequence
+fn osc52_copy(text: &str) {
+    use base64::Engine;
+    use std::io::Write;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
+    let _ = out.flush();
+}
+
 async fn mint(chain: &Chain, payer: &Keypair) -> Result<(String, u64), String> {
     let supply = chain.supply().await.map_err(|e| e.to_string())?;
     let reward = reward_at(supply);
@@ -1492,7 +1568,15 @@ async fn mint(chain: &Chain, payer: &Keypair) -> Result<(String, u64), String> {
     }
     let memo = memo_for_mint();
     debug_assert_eq!(memo.len(), MIN_MEMO_BYTES);
-    chain.mint(payer, &memo).await.map(|sig| (sig, reward)).map_err(|e| e.to_string())
+    chain.mint(payer, &memo).await.map(|sig| (sig, reward)).map_err(|e| {
+        let e = e.to_string();
+        // A wallet that never received XNT does not exist onchain yet
+        if e.contains("AccountNotFound") {
+            format!("this wallet has no XNT yet. Send at least {} XNT to it first", lamports(MIN_XNT_LAMPORTS))
+        } else {
+            e
+        }
+    })
 }
 
 #[cfg(test)]
