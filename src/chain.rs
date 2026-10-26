@@ -1,11 +1,11 @@
 //! Reads from X1 and the mint transaction.
 
-use crate::network::{Network, ATA_PROGRAM_ID, MEMO_PROGRAM_ID, TOKEN_2022_PROGRAM_ID};
+use crate::network::Network;
 use crate::rpc::RpcPool;
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
-use sha2::{Digest, Sha256};
 use solana_hash::Hash;
+use memo_sdk::{compute_budget, mint, token, TOKEN_2022_PROGRAM_ID};
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_message::Message;
@@ -16,19 +16,8 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-pub const MIN_MEMO_BYTES: usize = 69;
-pub const MAX_MEMO_BYTES: usize = 800;
-pub const MEMO_DECIMALS: u8 = 6;
-/// Headroom over the simulated compute units. Execution can use a few more units than the
-/// simulation (chain state moves on in between), and a zero-margin limit then fails with
-/// "Computational budget exceeded". Kept small because the fee follows the requested limit.
-const CU_LIMIT_MARGIN: u32 = 50;
-const COMPUTE_BUDGET_PROGRAM_ID: &str = "ComputeBudget111111111111111111111111111111";
-const INSTRUCTIONS_SYSVAR_ID: &str = "Sysvar1nstructions1111111111111111111111111";
-
-fn key(s: &str) -> Pubkey {
-    Pubkey::from_str(s).expect("valid built-in address")
-}
+pub use memo_sdk::mint::MEMO_MIN_BYTES as MIN_MEMO_BYTES;
+pub use memo_sdk::DECIMALS as MEMO_DECIMALS;
 
 fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
@@ -56,11 +45,7 @@ impl Chain {
     }
 
     fn token_account(&self, owner: &Pubkey) -> Pubkey {
-        Pubkey::find_program_address(
-            &[owner.as_ref(), key(TOKEN_2022_PROGRAM_ID).as_ref(), key(self.network.token_mint()).as_ref()],
-            &key(ATA_PROGRAM_ID),
-        )
-        .0
+        token::memo_token_account(self.network.sdk(), owner)
     }
 
     async fn account_data(&self, address: &Pubkey) -> Result<Option<Vec<u8>>> {
@@ -83,7 +68,7 @@ impl Chain {
     pub async fn supply(&self) -> Result<u64> {
         let r = self
             .rpc
-            .call("getTokenSupply", serde_json::json!([self.network.token_mint(), { "commitment": "confirmed" }]))
+            .call("getTokenSupply", serde_json::json!([self.network.sdk().memo_mint().to_string(), { "commitment": "confirmed" }]))
             .await?;
         r["value"]["amount"].as_str().and_then(|a| a.parse().ok()).ok_or_else(|| anyhow!("Bad supply"))
     }
@@ -109,71 +94,19 @@ impl Chain {
             .ok_or_else(|| anyhow!("Bad blockhash"))
     }
 
-    /// Create `owner`'s MEMO account if it does not exist (associated token account, CreateIdempotent = 1)
-    fn create_token_account(&self, payer: &Pubkey, owner: &Pubkey) -> Instruction {
-        Instruction::new_with_bytes(
-            key(ATA_PROGRAM_ID),
-            &[1],
-            vec![
-                AccountMeta::new(*payer, true),
-                AccountMeta::new(self.token_account(owner), false),
-                AccountMeta::new_readonly(*owner, false),
-                AccountMeta::new_readonly(key(self.network.token_mint()), false),
-                AccountMeta::new_readonly(solana_system_interface::program::ID, false),
-                AccountMeta::new_readonly(key(TOKEN_2022_PROGRAM_ID), false),
-            ],
-        )
-    }
-
     /// memo (index 0), create the MEMO account if `create`, process_mint
-    fn mint_instructions(&self, user: &Pubkey, memo: &[u8], create: bool) -> Vec<Instruction> {
-        let program = key(self.network.mint_program_id());
-        let mint = key(self.network.token_mint());
-        let token_program = key(TOKEN_2022_PROGRAM_ID);
-        let token_account = self.token_account(user);
-        let (mint_authority, _) = Pubkey::find_program_address(&[b"mint_authority"], &program);
-        let (mint_state, _) = Pubkey::find_program_address(&[b"mint_state"], &program);
-
-        let memo_ix = Instruction::new_with_bytes(key(MEMO_PROGRAM_ID), memo, vec![AccountMeta::new_readonly(*user, true)]);
-        let discriminator = Sha256::digest(b"global:process_mint");
-        let mint_ix = Instruction::new_with_bytes(
-            program,
-            &discriminator[..8],
-            vec![
-                AccountMeta::new(*user, true),
-                AccountMeta::new(mint, false),
-                AccountMeta::new_readonly(mint_authority, false),
-                AccountMeta::new(token_account, false),
-                AccountMeta::new_readonly(token_program, false),
-                AccountMeta::new_readonly(key(INSTRUCTIONS_SYSVAR_ID), false),
-                AccountMeta::new(mint_state, false),
-            ],
-        );
-        if create {
-            vec![memo_ix, self.create_token_account(user, user), mint_ix]
-        } else {
-            vec![memo_ix, mint_ix]
-        }
-    }
-
-    fn compute_limit(units: u32) -> Instruction {
-        // ComputeBudgetInstruction::SetComputeUnitLimit = 2
-        let mut data = vec![2u8];
-        data.extend_from_slice(&units.to_le_bytes());
-        Instruction::new_with_bytes(key(COMPUTE_BUDGET_PROGRAM_ID), &data, vec![])
+    fn mint_instructions(&self, user: &Pubkey, memo: &str, create: bool) -> Result<Vec<Instruction>> {
+        Ok(mint::mint_instructions(self.network.sdk(), user, memo, create)?)
     }
 
     /// Simulate, sign, send and wait for confirmation; returns the signature
-    pub async fn mint(&self, payer: &Keypair, memo: &[u8]) -> Result<String> {
-        if !(MIN_MEMO_BYTES..=MAX_MEMO_BYTES).contains(&memo.len()) {
-            bail!("Memo must be {MIN_MEMO_BYTES}-{MAX_MEMO_BYTES} bytes, got {}", memo.len());
-        }
+    pub async fn mint(&self, payer: &Keypair, memo: &str) -> Result<String> {
         let user = payer.pubkey();
         if !self.token_account_ready.load(Ordering::Relaxed) && self.account_data(&self.token_account(&user)).await?.is_some() {
             self.token_account_ready.store(true, Ordering::Relaxed);
         }
         let create = !self.token_account_ready.load(Ordering::Relaxed);
-        let result = self.send(payer, self.mint_instructions(&user, memo, create)).await;
+        let result = self.send(payer, self.mint_instructions(&user, memo, create)?).await;
         // After a mint the account exists; after a failure, check again next time
         self.token_account_ready.store(result.is_ok(), Ordering::Relaxed);
         result
@@ -188,14 +121,14 @@ impl Chain {
     /// Send MEMO (units) to another wallet, creating its MEMO account if needed
     pub async fn transfer_memo(&self, payer: &Keypair, to: &Pubkey, units: u64) -> Result<String> {
         let owner = payer.pubkey();
-        let mint = key(self.network.token_mint());
+        let mint = self.network.sdk().memo_mint();
         let destination = self.token_account(to);
         // Token-2022 TransferChecked = 12: amount (u64), decimals (u8)
         let mut data = vec![12u8];
         data.extend_from_slice(&units.to_le_bytes());
         data.push(MEMO_DECIMALS);
         let transfer = Instruction::new_with_bytes(
-            key(TOKEN_2022_PROGRAM_ID),
+            TOKEN_2022_PROGRAM_ID,
             &data,
             vec![
                 AccountMeta::new(self.token_account(&owner), false),
@@ -204,7 +137,7 @@ impl Chain {
                 AccountMeta::new_readonly(owner, true),
             ],
         );
-        self.send(payer, vec![self.create_token_account(&owner, to), transfer]).await
+        self.send(payer, vec![token::create_memo_token_account(self.network.sdk(), &owner, to), transfer]).await
     }
 
     /// Simulate to learn the compute units, append the limit plus a small margin (last, so a memo
@@ -212,7 +145,7 @@ impl Chain {
     /// sign, send and wait for confirmation
     async fn send(&self, payer: &Keypair, mut instructions: Vec<Instruction>) -> Result<String> {
         let (blockhash, units) = self.simulate(&payer.pubkey(), &instructions).await?;
-        instructions.push(Self::compute_limit(u32::try_from(units).unwrap_or(u32::MAX).saturating_add(CU_LIMIT_MARGIN)));
+        instructions.push(compute_budget::set_compute_unit_limit(compute_budget::limit_for(units)));
         let tx = Transaction::new_signed_with_payer(&instructions, Some(&payer.pubkey()), &[payer], blockhash);
         let signature = tx.signatures[0].to_string();
         self.rpc
@@ -229,7 +162,7 @@ impl Chain {
     async fn simulate(&self, payer: &Pubkey, instructions: &[Instruction]) -> Result<(Hash, u64)> {
         let blockhash = self.latest_blockhash().await?;
         let mut sim = instructions.to_vec();
-        sim.push(Self::compute_limit(400_000));
+        sim.push(compute_budget::set_compute_unit_limit(compute_budget::SIMULATION_CU_LIMIT));
         let mut sim_tx = Transaction::new_unsigned(Message::new(&sim, Some(payer)));
         sim_tx.message.recent_blockhash = blockhash;
         let r = self
@@ -292,8 +225,8 @@ mod tests {
         let s = chain.snapshot(&wallet).await.unwrap();
         println!("{s:?}");
         assert!(s.supply > 0);
-        let memo = br#"{"action":"mint","platform":"memo-miner","version":"0.1.0","chain":"X1","ts":0}"#;
-        let (_, units) = chain.simulate(&wallet, &chain.mint_instructions(&wallet, memo, true)).await.unwrap();
+        let memo = r#"{"action":"mint","platform":"memo-miner","version":"0.1.0","chain":"X1","ts":0}"#;
+        let (_, units) = chain.simulate(&wallet, &chain.mint_instructions(&wallet, memo, true).unwrap()).await.unwrap();
         println!("simulated units: {units}");
         assert!(units > 0);
 

@@ -1,50 +1,16 @@
-//! The memo-mint emission curve (amounts in units, 1 MEMO = 1,000,000 units).
+//! The memo-mint emission curve (amounts in units, 1 MEMO = 1,000,000 units), from memo-sdk,
+//! and how the miner formats amounts.
 //!
-//! Up to and including 10M supply every mint pays 1 MEMO. Above it, supply in (d * 10^k, (d+1) * 10^k]
-//! inside the decade (10M * 10^n, 10M * 10^(n+1)] pays decade_base * (10 - d) / 10,
-//! decade_base = 1 MEMO / 10^n: above 10M: 0.9, ..., above 90M: 0.1, above 100M: 0.09, ...
-//! down to 1 unit above 9T. Minting stops at the 10T cap. Same arithmetic as the contract.
+//! Up to and including 10M supply every mint pays 1 MEMO; above 10M: 0.9, ..., above 90M: 0.1,
+//! above 100M: 0.09, ... down to 1 unit above 9T. Minting stops at the 10T cap.
 
-pub const UNITS_PER_TOKEN: u64 = 1_000_000;
-const CURVE_START: u64 = 10_000_000 * UNITS_PER_TOKEN;
-const BASE_MINT: u64 = UNITS_PER_TOKEN;
-pub const MAX_SUPPLY: u64 = 10_000_000_000_000 * UNITS_PER_TOKEN;
-
-/// Exact reward in units for a mint at this supply (0 once the cap is reached)
-pub fn reward_at(supply: u64) -> u64 {
-    if supply >= MAX_SUPPLY {
-        return 0;
-    }
-    let amount = if supply <= CURVE_START {
-        BASE_MINT
-    } else {
-        let below = supply - 1;
-        let mut magnitude = CURVE_START;
-        let mut decade_base = BASE_MINT;
-        while below / 10 >= magnitude {
-            magnitude *= 10;
-            decade_base /= 10;
-        }
-        decade_base * (10 - below / magnitude) / 10
-    };
-    if supply.saturating_add(amount) > MAX_SUPPLY { 0 } else { amount }
-}
+pub use memo_sdk::mint::{reward_at, MAX_SUPPLY};
+pub use memo_sdk::UNITS_PER_MEMO as UNITS_PER_TOKEN;
 
 /// The reward step this supply is in: (start, end], the reward after `end` (None at the last step)
 pub fn step(supply: u64) -> (u64, u64, Option<u64>) {
-    let (start, end) = if supply <= CURVE_START {
-        (0, CURVE_START)
-    } else {
-        let below = supply - 1;
-        let mut magnitude = CURVE_START;
-        while below / 10 >= magnitude {
-            magnitude *= 10;
-        }
-        let d = below / magnitude;
-        (d * magnitude, (d + 1) * magnitude)
-    };
-    let next = reward_at(end + 1);
-    (start, end, (end < MAX_SUPPLY && next > 0).then_some(next))
+    let s = memo_sdk::mint::step(supply);
+    (s.start, s.end, s.next_reward)
 }
 
 /// Exact amount from units, trailing zeros trimmed: 900000 -> "0.9"

@@ -1,4 +1,4 @@
-//! X1 networks and the MEMO program addresses on each.
+//! X1 networks. The MEMO addresses on each come from memo-sdk.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
@@ -6,9 +6,6 @@ pub enum Network {
     Testnet,
 }
 
-pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-pub const ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
-pub const MEMO_PROGRAM_ID: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
 impl Network {
     pub fn name(self) -> &'static str {
@@ -26,17 +23,11 @@ impl Network {
         }
     }
 
-    pub fn mint_program_id(self) -> &'static str {
+    /// The same network in memo-sdk, which knows the MEMO addresses
+    pub fn sdk(self) -> memo_sdk::Network {
         match self {
-            Network::Mainnet => "8iq6zqaEVcfaym2u8t939PAN5jmfPVc6Z333RuxKTTZX",
-            Network::Testnet => "A31a17bhgQyRQygeZa1SybytjbCdjMpu6oPr9M3iQWzy",
-        }
-    }
-
-    pub fn token_mint(self) -> &'static str {
-        match self {
-            Network::Mainnet => "memoX1sJsBY6od7CfQ58XooRALwnocAZen4L7mW1ick",
-            Network::Testnet => "HLCoc7wNDavNMfWWw2Bwd7U7A24cesuhBSNkxZgvZm1",
+            Network::Mainnet => memo_sdk::Network::Mainnet,
+            Network::Testnet => memo_sdk::Network::Testnet,
         }
     }
 

@@ -1132,7 +1132,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memo-miner"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1143,10 +1143,10 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "memo-sdk",
  "ratatui",
  "reqwest",
  "serde_json",
- "sha2 0.10.9",
  "solana-hash",
  "solana-instruction",
  "solana-keypair",
@@ -1156,6 +1156,15 @@ dependencies = [
  "solana-system-interface",
  "solana-transaction",
  "tokio",
+]
+
+[[package]]
+name = "memo-sdk"
+version = "0.1.0"
+source = "git+https://github.com/xenartist/memo-sdk?tag=v0.1.0#872863db92f38fbee96ac8d50f2e66d7750026ae"
+dependencies = [
+ "solana-instruction",
+ "solana-pubkey",
 ]
 
 [[package]]

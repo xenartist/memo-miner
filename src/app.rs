@@ -214,9 +214,9 @@ fn now() -> String {
 
 /// The memo for each mint: exactly 69 bytes, the least memo-mint accepts (fewer compute units),
 /// with the time in seconds so consecutive mints differ
-fn memo_for_mint() -> Vec<u8> {
+fn memo_for_mint() -> String {
     let t = chrono::Utc::now().timestamp();
-    format!(r#"{{"action":"mint","platform":"memo-miner","chain":"X1","t":{t}}}"#).into_bytes()
+    format!(r#"{{"action":"mint","platform":"memo-miner","chain":"X1","t":{t}}}"#)
 }
 
 fn lamports(l: u64) -> String {
